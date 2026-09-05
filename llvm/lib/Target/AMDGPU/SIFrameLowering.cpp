@@ -2486,8 +2486,7 @@ bool SIFrameLowering::hasFPImpl(const MachineFunction &MF) const {
   return frameTriviallyRequiresSP(MFI) || MFI.isFrameAddressTaken() ||
          MF.getSubtarget<GCNSubtarget>().getRegisterInfo()->hasStackRealignment(
              MF) ||
-         mayReserveScratchForCWSR(MF) ||
-         MF.getTarget().Options.DisableFramePointerElim(MF);
+         mayReserveScratchForCWSR(MF) || MF.disableFramePointerElim();
 }
 
 bool SIFrameLowering::mayReserveScratchForCWSR(
