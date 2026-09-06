@@ -404,7 +404,7 @@ entry:
   ret float %7
 
 ; CHECK-LABEL:                      VFMA:
-; CHECK-HARDFP-FULLFP16-FAST:       vmla.f16  s2, s0, s1
+; CHECK-HARDFP-FULLFP16-FAST:       vfma.f16  s2, s0, s1
 ; CHECK-HARDFP-FULLFP16-FAST-NEXT:  vmov.f32  s0, s2
 }
 
