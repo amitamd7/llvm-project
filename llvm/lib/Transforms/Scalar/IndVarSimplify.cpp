@@ -1211,10 +1211,20 @@ bool IndVarSimplify::sinkUnusedInvariants(Loop *L) {
   if (!Preheader) return false;
 
   bool MadeAnyChanges = false;
+<<<<<<< HEAD
   BasicBlock::iterator InsertPt = ExitBlock->getFirstInsertionPt();
   BasicBlock::iterator I(Preheader->getTerminator());
   while (I != Preheader->begin()) {
     --I;
+=======
+  SmallVector<Value *, 16> SunkInsts;
+  for (Instruction &I : llvm::make_early_inc_range(llvm::reverse(*Preheader))) {
+
+    // Skip BB Terminator.
+    if (Preheader->getTerminator() == &I)
+      continue;
+
+>>>>>>> 10d3708a0bb8
     // New instructions were inserted at the end of the preheader.
     if (isa<PHINode>(I))
       break;
@@ -1265,6 +1275,7 @@ bool IndVarSimplify::sinkUnusedInvariants(Loop *L) {
       continue;
 
     // Otherwise, sink it to the exit block.
+<<<<<<< HEAD
     Instruction *ToMove = &*I;
     bool Done = false;
 
@@ -1280,12 +1291,19 @@ bool IndVarSimplify::sinkUnusedInvariants(Loop *L) {
       Done = true;
     }
 
+=======
+    I.moveBefore(ExitBlock->getFirstInsertionPt());
+    SunkInsts.push_back(&I);
+>>>>>>> 10d3708a0bb8
     MadeAnyChanges = true;
     ToMove->moveBefore(*ExitBlock, InsertPt);
     SE->forgetValue(ToMove);
     if (Done) break;
     InsertPt = ToMove->getIterator();
   }
+
+  if (!SunkInsts.empty())
+    SE->forgetValues(SunkInsts);
 
   return MadeAnyChanges;
 }
