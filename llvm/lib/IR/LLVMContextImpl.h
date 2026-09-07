@@ -1636,6 +1636,10 @@ public:
   DenseMap<std::pair<ElementCount, APFloat>, std::unique_ptr<ConstantFP>>
       FPSplatConstants;
 
+  EnumAttributeImpl *EnumAttrs[Attribute::NumEnumAttrKinds] = {};
+  UniquingSet<IntAttributeImpl> IntAttrs;
+  UniquingSet<StringAttributeImpl> StringAttrs;
+  UniquingSet<TypeAttributeImpl> TypeAttrs;
   FoldingSet<AttributeImpl> AttrsSet;
   UniquingSet<AttributeListImpl> AttrsLists;
   UniquingSet<AttributeSetNode> AttrsSetNodes;
