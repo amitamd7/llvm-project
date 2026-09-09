@@ -477,6 +477,13 @@ __OMP_RTL(__tgt_push_mapper_component, false, Void, VoidPtr, VoidPtr, VoidPtr,
 __OMP_RTL(__kmpc_task_allow_completion_event, false, VoidPtr, IdentPtr,
           /* Int */ Int32, /* kmp_task_t */ VoidPtr)
 
+__OMP_RTL(omp_target_alloc, false, VoidPtr, Int64, Int32)
+__OMP_RTL(omp_target_free, false, Void, VoidPtr, Int32)
+__OMP_RTL(omp_target_memcpy, false, Int32, VoidPtr, VoidPtr, Int64, Int64, Int64, Int32, Int32)
+__OMP_RTL(ompx_get_team_procs, false, Int32, Int32)
+__OMP_RTL(omp_get_initial_device, false, Int32,)
+__OMP_RTL(omp_get_default_device, false, Int32,)
+
 /// OpenMP Device runtime functions
 __OMP_RTL(__kmpc_target_init, false, Int32, KernelEnvironmentPtr, KernelLaunchEnvironmentPtr)
 __OMP_RTL(__kmpc_target_deinit, false, Void,)
@@ -1036,6 +1043,12 @@ __OMP_RTL_ATTRS(__kmpc_doacross_wait, BarrierAttrs, AttributeSet(),
 __OMP_RTL_ATTRS(__kmpc_doacross_fini, BarrierAttrs, AttributeSet(),
                 ParamAttrs(ReadOnlyPtrAttrs, SExt))
 
+__OMP_RTL_ATTRS(omp_target_alloc, AttributeSet(), AttributeSet(), ParamAttrs())
+__OMP_RTL_ATTRS(omp_target_free, AttributeSet(), AttributeSet(), ParamAttrs())
+__OMP_RTL_ATTRS(omp_target_memcpy, AttributeSet(), AttributeSet(), ParamAttrs())
+__OMP_RTL_ATTRS(ompx_get_team_procs, AttributeSet(), AttributeSet(), ParamAttrs())
+__OMP_RTL_ATTRS(omp_get_initial_device, AttributeSet(), AttributeSet(), ParamAttrs())
+__OMP_RTL_ATTRS(omp_get_default_device, AttributeSet(), AttributeSet(), ParamAttrs())
 __OMP_RTL_ATTRS(__kmpc_alloc_shared,
                 AttributeSet(EnumAttr(NoUnwind), EnumAttr(NoSync),
                              AllocSizeAttr(0, std::nullopt),
@@ -1271,33 +1284,52 @@ __OMP_PROC_BIND_KIND(unknown, 7)
 
 ///}
 
-
-/// Callback information in OpenMP Runtime Functions
+/// Which argument of a runtime function is a callback, and what the callback
+/// receives, in the encoding !callback metadata uses: the argument number the
+/// callee is passed in, then one entry per callback parameter giving the
+/// argument of the runtime call it is forwarded from, with -1 for a parameter
+/// the runtime supplies itself.
 ///
 ///{
 
-#define OmpIndices(...) ArrayRef<int>({__VA_ARGS__})
-
 #ifndef OMP_RTL_CB_INFO
-#define OMP_RTL_CB_INFO(Enum, Str, ArgNo, ArgOmpIndices, IsVarArg)
+#define OMP_RTL_CB_INFO(Enum, Str, ArgNo, ArgIndices, IsVarArg)
 #endif
 
-#define __OMP_RTL_CB_INFO(Name, ArgNo, ArgOmpIndices, IsVarArg)                                      \
-  OMP_RTL_CB_INFO(OMPRTL_##Name, #Name, ArgNo, ArgOmpIndices, IsVarArg)
+#define __OMP_RTL_CB_INFO(Name, ArgNo, ArgIndices, IsVarArg)                   \
+  OMP_RTL_CB_INFO(OMPRTL_##Name, #Name, ArgNo, ArgIndices, IsVarArg)
 
-__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_4, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_4u, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_8, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_8u, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_4, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_4u, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_8, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_8u, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_for_static_loop_4, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_for_static_loop_4u, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_for_static_loop_8, 1, OmpIndices(-1, -1), false)
-__OMP_RTL_CB_INFO(__kmpc_for_static_loop_8u, 1, OmpIndices(-1, -1), false)
+/// The loop runtime functions all take (loc, fn, arg, num_iters, ...) and hand
+/// the loop body (fn) an iteration the runtime picks and the arg they were
+/// given, so the body's second parameter is in fact argument 2. It is left
+/// unknown deliberately: the runtime invokes the body once per iteration while
+/// the IR shows a single call, and naming the argument it comes from would let
+/// a consumer reason about what the payload carries from one iteration to the
+/// next as if the body ran once.
+#define __OMP_LOOP_CB_INDICES ArrayRef<int>({-1, -1})
 
+__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_4, 1, __OMP_LOOP_CB_INDICES,
+                  false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_4u, 1, __OMP_LOOP_CB_INDICES,
+                  false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_8, 1, __OMP_LOOP_CB_INDICES,
+                  false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_static_loop_8u, 1, __OMP_LOOP_CB_INDICES,
+                  false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_4, 1, __OMP_LOOP_CB_INDICES,
+                  false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_4u, 1,
+                  __OMP_LOOP_CB_INDICES, false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_8, 1, __OMP_LOOP_CB_INDICES,
+                  false)
+__OMP_RTL_CB_INFO(__kmpc_distribute_for_static_loop_8u, 1,
+                  __OMP_LOOP_CB_INDICES, false)
+__OMP_RTL_CB_INFO(__kmpc_for_static_loop_4, 1, __OMP_LOOP_CB_INDICES, false)
+__OMP_RTL_CB_INFO(__kmpc_for_static_loop_4u, 1, __OMP_LOOP_CB_INDICES, false)
+__OMP_RTL_CB_INFO(__kmpc_for_static_loop_8, 1, __OMP_LOOP_CB_INDICES, false)
+__OMP_RTL_CB_INFO(__kmpc_for_static_loop_8u, 1, __OMP_LOOP_CB_INDICES, false)
+
+#undef __OMP_LOOP_CB_INDICES
 #undef __OMP_RTL_CB_INFO
 #undef OMP_RTL_CB_INFO
 

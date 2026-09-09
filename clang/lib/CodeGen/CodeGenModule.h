@@ -383,6 +383,7 @@ public:
     NxNotBinOpRed,
     NxUnsupportedRedOp,
     NxNoRedVar,
+    NxMultRedVar,
     NxUnsupportedRedExpr,
     NxUnsupportedXteamRedThreadLimit,
     NxUnsupportedPseudoObject,
