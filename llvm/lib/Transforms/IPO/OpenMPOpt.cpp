@@ -113,7 +113,7 @@ static cl::opt<bool> DisableOpenMPOptFolding(
 static cl::opt<bool> DisableOpenMPOptStateMachineRewrite(
     "openmp-opt-disable-state-machine-rewrite",
     cl::desc("Disable OpenMP optimizations that replace the state machine."),
-    cl::Hidden, cl::init(true));
+    cl::Hidden, cl::init(false));
 
 static cl::opt<bool> DisableOpenMPOptBarrierElimination(
     "openmp-opt-disable-barrier-elimination",
@@ -3966,8 +3966,7 @@ struct AAKernelInfoFunction : AAKernelInfo {
     Attributor::VirtualUseCallbackTy CustomStateMachineUseCB =
         [&](Attributor &A, const AbstractAttribute *QueryingAA) {
           // Whenever we create a custom state machine we will insert calls to
-          // __kmpc_get_hardware_num_threads_in_block,
-          // __kmpc_get_warp_size,
+          // __kmpc_get_max_team_threads,
           // __kmpc_barrier_simple_generic,
           // __kmpc_kernel_parallel, and
           // __kmpc_kernel_end_parallel.
@@ -3982,9 +3981,8 @@ struct AAKernelInfoFunction : AAKernelInfo {
 
     // Not needed if we are pre-runtime merge.
     if (!KernelInitCB->getCalledFunction()->isDeclaration()) {
-      RegisterVirtualUse(OMPRTL___kmpc_get_hardware_num_threads_in_block,
+      RegisterVirtualUse(OMPRTL___kmpc_get_max_team_threads,
                          CustomStateMachineUseCB);
-      RegisterVirtualUse(OMPRTL___kmpc_get_warp_size, CustomStateMachineUseCB);
       RegisterVirtualUse(OMPRTL___kmpc_barrier_simple_generic,
                          CustomStateMachineUseCB);
       RegisterVirtualUse(OMPRTL___kmpc_kernel_parallel,
@@ -4413,41 +4411,32 @@ struct AAKernelInfoFunction : AAKernelInfo {
     else
       forceSingleThreadPerWorkgroupHelper(A);
 
-    // Adjust the global exec mode flag that tells the runtime what mode this
-    // kernel is executed in.
+    // The mode is recorded in two places that have to agree: the kernel
+    // environment, which the device runtime reads in __kmpc_target_init, and
+    // the per-kernel exec mode global, which the plugin reads out of the image
+    // to pick the launch configuration. Update both here so that the two can
+    // never be left disagreeing about how this kernel runs. Kernels built by
+    // clang and by OpenMPIRBuilder always carry the global, but hand-written IR
+    // need not, so only write it if it is there.
     assert(ExecModeVal == OMP_TGT_EXEC_MODE_GENERIC &&
            "Initially non-SPMD kernel has SPMD exec mode!");
     setExecModeOfKernelEnvironment(
         ConstantInt::get(ExecModeC->getIntegerType(),
                          ExecModeVal | OMP_TGT_EXEC_MODE_GENERIC_SPMD));
 
-    // The global variable needs to be set too.
-    GlobalVariable *ExecMode = Kernel->getParent()->getGlobalVariable(
-        (Kernel->getName() + "_exec_mode").str());
-
-    if (!ExecMode) { // likely fortran missing exec mode
-      auto Remark = [&](OptimizationRemark OR) {
-        return OR << "Could not transform generic-mode kernel to SPMD-mode. "
-                     "Missing mode.";
-      };
-      A.emitRemark<OptimizationRemark>(KernelInitCB, "OMP122", Remark);
-    return false;
+    if (GlobalVariable *ExecMode = Kernel->getParent()->getGlobalVariable(
+            (Kernel->getName() + "_exec_mode").str())) {
+      assert(ExecMode->getInitializer() &&
+             "ExecMode doesn't have initializer!");
+      assert(isa<ConstantInt>(ExecMode->getInitializer()) &&
+             "ExecMode is not an integer!");
+      assert(cast<ConstantInt>(ExecMode->getInitializer())->getSExtValue() ==
+                 OMP_TGT_EXEC_MODE_GENERIC &&
+             "Initially non-SPMD kernel has SPMD exec mode!");
+      ExecMode->setInitializer(
+          ConstantInt::get(ExecMode->getInitializer()->getType(),
+                           ExecModeVal | OMP_TGT_EXEC_MODE_GENERIC_SPMD));
     }
-    assert(ExecMode && "Kernel without exec mode?");
-    assert(ExecMode->getInitializer() && "ExecMode doesn't have initializer!");
-
-    // Set the global exec mode flag to indicate SPMD-Generic mode.
-    assert(isa<ConstantInt>(ExecMode->getInitializer()) &&
-           "ExecMode is not an integer!");
-
-    // Adjust the global exec mode flag that tells the runtime what mode this
-    // kernel is executed in.
-    assert(cast<ConstantInt>(ExecMode->getInitializer())->getSExtValue() ==
-               OMP_TGT_EXEC_MODE_GENERIC &&
-           "Initially non-SPMD kernel has SPMD exec mode!");
-    ExecMode->setInitializer(
-        ConstantInt::get(ExecMode->getInitializer()->getType(),
-                         ExecModeVal | OMP_TGT_EXEC_MODE_GENERIC_SPMD));
 
     ++NumOpenMPTargetRegionKernelsSPMD;
 
@@ -4472,10 +4461,10 @@ struct AAKernelInfoFunction : AAKernelInfo {
       return false;
 
     auto &OMPInfoCache = static_cast<OMPInformationCache &>(A.getInfoCache());
-    if (!OMPInfoCache.runtimeFnsAvailable(
-            {OMPRTL___kmpc_get_hardware_num_threads_in_block,
-             OMPRTL___kmpc_get_warp_size, OMPRTL___kmpc_barrier_simple_generic,
-             OMPRTL___kmpc_kernel_parallel, OMPRTL___kmpc_kernel_end_parallel}))
+    if (!OMPInfoCache.runtimeFnsAvailable({OMPRTL___kmpc_get_max_team_threads,
+                                           OMPRTL___kmpc_barrier_simple_generic,
+                                           OMPRTL___kmpc_kernel_parallel,
+                                           OMPRTL___kmpc_kernel_end_parallel}))
       return false;
 
     ConstantStruct *ExistingKernelEnvC =
@@ -4554,13 +4543,11 @@ struct AAKernelInfoFunction : AAKernelInfo {
     // Create all the blocks:
     //
     //                       InitCB = __kmpc_target_init(...)
-    //                       BlockHwSize =
-    //                         __kmpc_get_hardware_num_threads_in_block();
-    //                       WarpSize = __kmpc_get_warp_size();
-    //                       BlockSize = BlockHwSize - WarpSize;
+    //                       MaxTeamThreads =
+    //                           __kmpc_get_max_team_threads(/*IsSPMD=*/false);
     // IsWorkerCheckBB:      bool IsWorker = InitCB != -1;
     //                       if (IsWorker) {
-    //                         if (InitCB >= BlockSize) return;
+    //                         if (InitCB >= MaxTeamThreads) return;
     // SMBeginBB:               __kmpc_barrier_simple_generic(...);
     //                         void *WorkFn;
     //                         bool Active = __kmpc_kernel_parallel(&WorkFn);
@@ -4625,26 +4612,27 @@ struct AAKernelInfoFunction : AAKernelInfo {
     IsWorker->setDebugLoc(DLoc);
     CondBrInst::Create(IsWorker, IsWorkerCheckBB, UserCodeEntryBB, InitBB);
 
+    // How many of the block's threads can be worker threads is a property of
+    // the launch geometry, which the runtime knows and the block size alone
+    // does not determine: a target may host the main thread in a whole warp
+    // above the workers, or in a single thread above them. Ask the runtime
+    // rather than subtracting a warp here, or the workers in between are left
+    // in neither group, waiting for no parallel region while it is handed
+    // iterations. The mode is passed in rather than left for the runtime to
+    // look up, because this runs before the state machine's first barrier and
+    // so before the shared flag holding it is visible here. It is a constant:
+    // a custom state machine is only ever built for a generic-mode kernel.
     Module &M = *Kernel->getParent();
-    FunctionCallee BlockHwSizeFn =
+    FunctionCallee MaxTeamThreadsFn =
         OMPInfoCache.OMPBuilder.getOrCreateRuntimeFunction(
-            M, OMPRTL___kmpc_get_hardware_num_threads_in_block);
-    FunctionCallee WarpSizeFn =
-        OMPInfoCache.OMPBuilder.getOrCreateRuntimeFunction(
-            M, OMPRTL___kmpc_get_warp_size);
-    CallInst *BlockHwSize =
-        CallInst::Create(BlockHwSizeFn, "block.hw_size", IsWorkerCheckBB);
-    OMPInfoCache.setCallingConvention(BlockHwSizeFn, BlockHwSize);
-    BlockHwSize->setDebugLoc(DLoc);
-    CallInst *WarpSize =
-        CallInst::Create(WarpSizeFn, "warp.size", IsWorkerCheckBB);
-    OMPInfoCache.setCallingConvention(WarpSizeFn, WarpSize);
-    WarpSize->setDebugLoc(DLoc);
-    Instruction *BlockSize = BinaryOperator::CreateSub(
-        BlockHwSize, WarpSize, "block.size", IsWorkerCheckBB);
-    BlockSize->setDebugLoc(DLoc);
+            M, OMPRTL___kmpc_get_max_team_threads);
+    Constant *IsSPMDArg = ConstantInt::get(OMPInfoCache.OMPBuilder.Int32, 0);
+    CallInst *MaxTeamThreads = CallInst::Create(
+        MaxTeamThreadsFn, {IsSPMDArg}, "max_team_threads", IsWorkerCheckBB);
+    OMPInfoCache.setCallingConvention(MaxTeamThreadsFn, MaxTeamThreads);
+    MaxTeamThreads->setDebugLoc(DLoc);
     Instruction *IsMainOrWorker = ICmpInst::Create(
-        ICmpInst::ICmp, llvm::CmpInst::ICMP_SLT, KernelInitCB, BlockSize,
+        ICmpInst::ICmp, llvm::CmpInst::ICMP_SLT, KernelInitCB, MaxTeamThreads,
         "thread.is_main_or_worker", IsWorkerCheckBB);
     IsMainOrWorker->setDebugLoc(DLoc);
     CondBrInst::Create(IsMainOrWorker, StateMachineBeginBB,
@@ -5811,7 +5799,6 @@ void OpenMPOpt::registerAAsForFunction(Attributor &A, const Function &F) {
           IRPosition::value(*LI->getPointerOperand()));
       continue;
     }
-#if 0 // fixme snap2 mi-teams nest_call_par2
     if (auto *CI = dyn_cast<CallBase>(&I)) {
       if (!DisableOpenMPOptDeglobalization && !HasHeapToStackCandidate) {
         if (!TLI)
@@ -5823,7 +5810,6 @@ void OpenMPOpt::registerAAsForFunction(Attributor &A, const Function &F) {
         A.getOrCreateAAFor<AAIndirectCallInfo>(
             IRPosition::callsite_function(*CI));
     }
-#endif
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
       A.getOrCreateAAFor<AAIsDead>(IRPosition::value(*SI));
       A.getOrCreateAAFor<AAAddressSpace>(
