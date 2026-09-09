@@ -8,6 +8,7 @@
 
 #include "decode.h"
 
+#include "amdgpu-formats.h"
 #include "amdgpu-mc-tables.h"
 #include "canonical-op.h"
 #include "decoded-inst.h"
@@ -191,6 +192,107 @@ void classifyImplicitDefs(DecodedInst &Di, const MCInstrDesc &Desc) {
   }
 }
 
+// Report a malformed VOPD packet at its source offset.
+Error failVOPDDecode(const DecodedInst &Di, const Twine &Detail) {
+  return createStringError("decodeKernel: malformed VOPD instruction at " +
+                           Twine(Di.Offset) + ": " + Detail);
+}
+
+// Record one component source or its bitop truth-table index. V_BITOP3 uses
+// each immediate bit as the result for one of the eight src0/src1/src2 input
+// combinations, with the input values forming that bit's three-bit index.
+Error decodeVOPDSource(DecodedInst &Di, DecodedInst::VOPDHalf &Half,
+                       const VOPDComponentInfo &Info, unsigned ComponentSrcIdx,
+                       bool IsVOPD3) {
+  unsigned OperandIdx = Info.getSrcOperandIdx(ComponentSrcIdx, IsVOPD3);
+  if (OperandIdx >= Di.numOperands())
+    return failVOPDDecode(Di, "component source operand is out of range");
+
+  if (static_cast<int>(OperandIdx) == Info.getBitOp3OperandIdx()) {
+    if (!Di.isImm(OperandIdx))
+      return failVOPDDecode(Di, "bitop3 operand is not an immediate");
+    int64_t TruthTableIdx = Di.getImm(OperandIdx);
+    if (TruthTableIdx < 0 || TruthTableIdx > UINT8_MAX)
+      return failVOPDDecode(Di, "bitop3 immediate is out of range");
+    Half.setBitOp3(static_cast<uint8_t>(TruthTableIdx));
+    return Error::success();
+  }
+
+  if (Half.numSources() == 3)
+    return failVOPDDecode(Di, "component source count exceeds storage");
+  unsigned LogicalSrc = Half.appendSource(OperandIdx);
+
+  if (IsVOPD3 && ComponentSrcIdx < Info.getVOPD3ModsNum()) {
+    if (OperandIdx == 0 || !Di.isImm(OperandIdx - 1))
+      return failVOPDDecode(Di, "component source modifier is missing");
+    int64_t Mods = Di.getImm(OperandIdx - 1);
+    if (Mods < 0 || Mods > UINT8_MAX)
+      return failVOPDDecode(Di, "component source modifier is out of range");
+    Half.setSourceModifier(LogicalSrc, static_cast<uint8_t>(Mods));
+  }
+  return Error::success();
+}
+
+// Decode one component of a VOPD packet.
+Error decodeVOPDHalf(DecodedInst &Di, DecodedInst::VOPDHalf &Half,
+                     const VOPDComponentInfo &Info, unsigned ComponentOpcode,
+                     const OpcodeMap &OpcMap, bool IsVOPD3) {
+  Half.CanonOp = OpcMap.lookup(ComponentOpcode);
+  if (Half.CanonOp == CanonicalOp::Unknown)
+    return failVOPDDecode(Di, "component opcode has no canonical operation");
+
+  unsigned DstIdx = Info.getDstOperandIdx();
+  if (DstIdx >= Di.numOperands() || !Di.isReg(DstIdx))
+    return failVOPDDecode(Di,
+                          "component destination is missing or not a register");
+  Half.setDestinationIndex(DstIdx);
+
+  const unsigned NumParsedSrcs = Info.getParsedSrcOperandsNum();
+  for (unsigned I = 0; I != NumParsedSrcs; ++I)
+    if (Error Err = decodeVOPDSource(Di, Half, Info, I, IsVOPD3))
+      return Err;
+
+  int BitOpIdx = Info.getBitOp3OperandIdx();
+  if (BitOpIdx < 0 && (Half.CanonOp == CanonicalOp::V_AND_B32 ||
+                       Half.CanonOp == CanonicalOp::V_OR_B32 ||
+                       Half.CanonOp == CanonicalOp::V_XOR_B32 ||
+                       Half.CanonOp == CanonicalOp::V_BITOP3_B32))
+    BitOpIdx = COMGR::hotswap::getNamedOperandIdx(Di.Inst.getOpcode(),
+                                                  AMDGPU::OpName::bitop3);
+
+  if (!Half.hasBitOp3() && BitOpIdx >= 0) {
+    unsigned OperandIdx = static_cast<unsigned>(BitOpIdx);
+    if (OperandIdx >= Di.numOperands() || !Di.isImm(OperandIdx))
+      return failVOPDDecode(Di, "bitop3 operand is missing or not immediate");
+    int64_t TruthTableIdx = Di.getImm(OperandIdx);
+    if (TruthTableIdx < 0 || TruthTableIdx > UINT8_MAX)
+      return failVOPDDecode(Di, "bitop3 immediate is out of range");
+    Half.setBitOp3(static_cast<uint8_t>(TruthTableIdx));
+  }
+  return Error::success();
+}
+
+// Populate the component views of a VOPD instruction.
+Error decodeVOPD(DecodedInst &Di, const MCInstrInfo &MCII,
+                 const OpcodeMap &OpcMap) {
+  if (!COMGR::hotswap::isVOPD(Di.Inst.getOpcode()))
+    return Error::success();
+
+  Di.VOPD.emplace();
+  const bool IsVOPD3 = (Di.TargetSpecificFlags & AmdgpuFormat::VOPD3) != 0;
+  auto [OpX, OpY] = COMGR::hotswap::getVOPDComponents(Di.Inst.getOpcode());
+  const MCInstrDesc &OpXDesc = MCII.get(OpX);
+  const MCInstrDesc &OpYDesc = MCII.get(OpY);
+  VOPDComponentInfo XInfo(OpXDesc, IsVOPD3);
+  VOPDComponentInfo YInfo(OpYDesc, XInfo, IsVOPD3);
+  if (Error Err =
+          decodeVOPDHalf(Di, (*Di.VOPD)[AMDGPU::VOPD::ComponentIndex::X], XInfo,
+                         OpX, OpcMap, IsVOPD3))
+    return Err;
+  return decodeVOPDHalf(Di, (*Di.VOPD)[AMDGPU::VOPD::ComponentIndex::Y], YInfo,
+                        OpY, OpcMap, IsVOPD3);
+}
+
 } // namespace
 
 Expected<SmallVector<uint64_t>>
@@ -258,6 +360,8 @@ Expected<DecodeResult> decodeKernel(const MCState &Mc, const OpcodeMap &OpcMap,
     driftCheckTiedIn(Di, Desc);
     driftCheckSrcN(Mc, Di, Desc);
     classifyImplicitDefs(Di, Desc);
+    if (Error Err = decodeVOPD(Di, *Mc.InstrInfo, OpcMap))
+      return std::move(Err);
 
     bool IsEnd = decodedInstEndsBlock(Di);
     Out.Insts.push_back(std::move(Di));

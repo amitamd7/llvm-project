@@ -82,7 +82,6 @@ constexpr uint8_t GlobalStoreDwordVaddrBytes[] = {0x00, 0x80, 0x70, 0xdc,
                                                   0x02, 0x01, 0x7f, 0x00};
 constexpr uint8_t GlobalStoreDwordSaddrBytes[] = {0x00, 0x80, 0x70, 0xdc,
                                                   0x00, 0x01, 0x00, 0x00};
-
 // Holds one gfx942 MCState for the tests that need the disassembler or an
 // MCContext. initMCState registers the AMDGPU target itself, so no separate
 // target-init step is required.
